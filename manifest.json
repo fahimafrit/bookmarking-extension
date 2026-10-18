@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "My Video & Link Library",
+  "version": "1.0.0",
+  "description": "Personal library for videos, images, GIFs and pages with tags, snapshots and timestamps.",
+  "permissions": ["contextMenus", "activeTab", "scripting", "unlimitedStorage"],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_title": "Open my library" },
+  "icons": { "16": "icons/16.png", "48": "icons/48.png", "128": "icons/128.png" },
+  "commands": {
+    "save-bookmark": { "suggested_key": { "default": "Alt+B" }, "description": "Save this page/video to my library" },
+    "take-snapshot": { "suggested_key": { "default": "Alt+S" }, "description": "Take a video snapshot" },
+    "mark-timestamp": { "suggested_key": { "default": "Alt+T" }, "description": "Mark a timestamp" }
+  }
+}

@@ -62,7 +62,7 @@ function ui(mode, d) {
   </style><div class=b><b>${mo ? '⏱ Mark timestamp' : '🔖 Save bookmark'}</b>
   ${mo ? '<div class=row><label>Start<input type=text id=s></label><label>End (optional)<input type=text id=e placeholder="e.g. 2:10"></label><button id=now title="End = current time">now</button></div>' : ''}
   <label>Note<input type=text id=n></label>
-  ${mo ? '' : '<label>Folder<select id=f></select></label><input type=text id=fn placeholder="e.g. Music/Rock (use / for a subfolder)" style="display:none">'}
+  ${mo ? '' : '<label>Folder<select id=f></select></label><input type=text id=fn placeholder="New folder name" style="display:none"><select id=fp style="display:none"></select>'}
   <div class=row><button id=ok>Save</button><button id=no>Cancel</button></div></div>`;
   const g = i => r.getElementById(i);
   if (mo && d.t != null) g('s').value = fmt(d.t);
@@ -72,7 +72,9 @@ function ui(mode, d) {
     for (const q of d.folders) { const o = document.createElement('option'), s = q.split('/'); o.value = q; o.textContent = '\u2003'.repeat(s.length - 1) + (s.length > 1 ? '↳ ' : '📁 ') + s[s.length - 1]; sel.append(o); }
     const nw = document.createElement('option'); nw.value = '__new'; nw.textContent = '➕ New folder…'; sel.append(nw);
     sel.value = d.folder;
-    sel.onchange = () => { g('fn').style.display = sel.value === '__new' ? '' : 'none'; if (sel.value === '__new') g('fn').focus(); };
+    const fp = g('fp'), t0 = document.createElement('option'); t0.value = ''; t0.textContent = '— create at top level —'; fp.append(t0);
+    for (const z of d.folders) { const o = document.createElement('option'); o.value = z; o.textContent = 'inside: ' + z; fp.append(o); }
+    sel.onchange = () => { const n = sel.value === '__new'; g('fn').style.display = fp.style.display = n ? '' : 'none'; if (n) g('fn').focus(); };
   }
   const close = () => host.remove();
   if (mo) g('now').onclick = () => { const v = vid(); if (v) g('e').value = fmt(v.currentTime); };
@@ -80,7 +82,8 @@ function ui(mode, d) {
   const save = () => {
     const note = g('n').value.trim();
     if (!mo) {
-      const folder = g('f').value === '__new' ? (g('fn').value.trim() || 'General') : g('f').value;
+      let folder = g('f').value;
+      if (folder === '__new') { const t = g('fn').value.trim(), par = g('fp').value; folder = !t ? 'General' : (par && !t.startsWith('/') ? par + '/' + t : t); }
       chrome.runtime.sendMessage({ k: 'bm', id: d.id, notes: note, folder, from: d.folder }); return close();
     }
     const s = p(g('s').value), e = p(g('e').value);

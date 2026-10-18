@@ -60,10 +60,10 @@ function ui(mode, d) {
   .bad{border-color:#f55!important}.row{display:flex;gap:8px;align-items:flex-end}
   .ck{flex-direction:row;align-items:center;gap:6px;color:#ccd}
   button{border:0;border-radius:6px;padding:7px 12px;cursor:pointer;background:#3a4152;color:#fff}
-  #ok{background:#6366f1}.sg{display:flex;flex-wrap:wrap;gap:4px}.sg button{padding:2px 8px;font-size:12px;border-radius:99px}.sg button.on{background:#6366f1}.lab{font-size:12px;color:#aab}
-  </style><div class=b><b>${mo ? '⏱ Mark timestamp' : '🔖 Add tags'}</b>
+  #ok{background:#6366f1}.sg{display:flex;flex-wrap:wrap;gap:4px}.sg button{padding:2px 8px;font-size:12px;border-radius:99px}.sg button.on{background:#6366f1}.lab{font-size:12px;color:#aab}select{background:#12151c;border:1px solid #3a4152;color:#fff;border-radius:6px;padding:6px 8px;font-size:14px;width:100%;box-sizing:border-box}
+  </style><div class=b><b>${mo ? '⏱ Mark timestamp' : '🔖 Save bookmark'}</b>
   ${mo ? '<div class=row><label>Start<input type=text id=s></label><label>End (optional)<input type=text id=e placeholder="e.g. 2:10"></label><button id=now title="End = current time">now</button></div>' : ''}
-  <label>Note<input type=text id=n></label><label>Tags (comma separated)<input type=text id=t></label>${mo ? '' : '<label class=ck><input type=checkbox id=nt> No tag</label>'}<div class=lab id=l1>Your tags</div><div class=sg id=sg></div><div class=lab id=l2>Words from the title</div><div class=sg id=sw></div>
+  <label>Note<input type=text id=n></label><label>Tags (comma separated)<input type=text id=t></label>${mo ? '' : '<label class=ck><input type=checkbox id=nt> No tag</label>'}<div class=lab id=l1>Your tags</div><div class=sg id=sg></div><div class=lab id=l2>Words from the title</div><div class=sg id=sw></div>${mo ? '' : '<label>Folder<select id=f></select></label><input type=text id=fn placeholder="e.g. Music/Rock (use / for a subfolder)" style="display:none">'}
   ${mo ? '<label class=ck><input type=checkbox id=m> Also add these tags to the main bookmark</label>' : ''}
   <div class=row><button id=ok>Save</button><button id=no>Cancel</button></div></div>`;
   const g = i => r.getElementById(i);
@@ -87,6 +87,13 @@ function ui(mode, d) {
   g('t').oninput = () => { if (g('nt')) g('nt').checked = false; sync(); };
   if (!mo) g('nt').onchange = () => { g('t').disabled = g('nt').checked; if (g('nt').checked) { g('t').value = ''; } sync(); };
   sync();
+  if (!mo) {
+    const sel = g('f');
+    for (const p of d.folders) { const o = document.createElement('option'), s = p.split('/'); o.value = p; o.textContent = '\u2003'.repeat(s.length - 1) + (s.length > 1 ? '↳ ' : '📁 ') + s[s.length - 1]; sel.append(o); }
+    const nw = document.createElement('option'); nw.value = '__new'; nw.textContent = '➕ New folder…'; sel.append(nw);
+    sel.value = d.folder;
+    sel.onchange = () => { g('fn').style.display = sel.value === '__new' ? '' : 'none'; if (sel.value === '__new') g('fn').focus(); };
+  }
   const close = () => host.remove();
   if (mo) g('now').onclick = () => { const v = vid(); if (v) g('e').value = fmt(v.currentTime); };
   g('no').onclick = close;
@@ -95,7 +102,8 @@ function ui(mode, d) {
     if (!mo) {
       const none = g('nt').checked;
       if (!tags.length && !none) { g('t').classList.add('bad'); return; }
-      chrome.runtime.sendMessage({ k: 'bm', id: d.id, tags: none ? [] : tags, notes: note }); return close();
+      const folder = g('f').value === '__new' ? (g('fn').value.trim() || 'General') : g('f').value;
+      chrome.runtime.sendMessage({ k: 'bm', id: d.id, tags: none ? [] : tags, notes: note, folder }); return close();
     }
     const s = p(g('s').value), e = p(g('e').value);
     const badS = s == null || isNaN(s), badE = isNaN(e);
@@ -136,9 +144,9 @@ async function ensure(p, info) {
       id: url, url, title: p.title || url, source: img ? p.url : '',
       type: isImg ? (gif ? 'gif' : 'image') : (p.t != null || yt ? 'video' : 'page'),
       thumb: img || (p.ct.startsWith('image/') ? url : yt ? `https://i.ytimg.com/vi/${yt}/hqdefault.jpg` : abs(p.og, p.url)),
-      tags: [], notes: '', saved: Date.now(), snaps: [], moments: [],
+      tags: [], notes: '', folder: 'General', saved: Date.now(), snaps: [], moments: [],
     };
-    await lib.put(it);
+    await lib.put(it); await lib.addFolder('General');
   }
   return it;
 }
@@ -152,7 +160,7 @@ async function run(cmd, tab, info = {}) {
     const all = [...new Set((await lib.all()).flatMap(i => [...i.tags, ...i.moments.flatMap(m => m.tags)]))];
     const w = words(it.title).filter(x => !all.some(a => a.toLowerCase() === x));
     const show = (mode, d) => chrome.scripting.executeScript({ target: { tabId: tab.id }, func: ui, args: [mode, d] });
-    if (cmd === 'save') await show('bm', { id: it.id, tags: it.tags, notes: it.notes, all, words: w });
+    if (cmd === 'save') await show('bm', { id: it.id, tags: it.tags, notes: it.notes, all, words: w, folders: await lib.folders(), folder: it.folder || 'General' });
     if (cmd === 'moment') await show('mo', { id: it.id, t: p.t, all, words: w });
     if (cmd === 'snap') {
       const [{ result: r0 }] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: grab });
@@ -167,7 +175,7 @@ chrome.runtime.onMessage.addListener((m, s) => {
   (async () => {
     const it = await lib.get(m.id); if (!it) return;
     const uniq = a => [...new Set(a)];
-    if (m.k === 'bm') { it.tags = uniq(m.tags); it.notes = m.notes; }
+    if (m.k === 'bm') { it.tags = uniq(m.tags); it.notes = m.notes; it.folder = await lib.addFolder(m.folder); }
     if (m.k === 'mo') {
       it.moments.push({ id: crypto.randomUUID(), start: m.start, end: m.end, note: m.note, tags: uniq(m.tags) });
       if (m.main) it.tags = uniq([...it.tags, ...m.tags]);

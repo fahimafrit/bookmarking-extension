@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "My Video & Link Library",
+  "name": "Bookmarking Extension",
   "version": "1.0.0",
   "description": "Personal library for videos, images, GIFs and pages with tags, snapshots and timestamps.",
   "permissions": ["contextMenus", "activeTab", "scripting", "unlimitedStorage"],

@@ -24,3 +24,10 @@ textarea{min-height:70px}h3{margin:14px 0 6px;font-size:14px}
 figure{margin:0}figure img{width:100%;border-radius:8px;cursor:zoom-in}figure img.zoom{position:fixed;inset:5vh 5vw;width:90vw;height:90vh;object-fit:contain;background:#000;z-index:99;cursor:zoom-out}
 figcaption{display:flex;justify-content:space-between;align-items:center;font-size:12px}figcaption button{padding:1px 6px}
 .danger{color:#dc2626;margin-top:16px}
+.wrap{display:flex;align-items:flex-start}section{flex:1;min-width:0}
+aside{width:250px;flex:none;position:sticky;top:64px;max-height:calc(100vh - 80px);overflow:auto;padding:0 8px 20px 20px}
+.sh{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}.sh button{padding:3px 8px;font-size:12px}
+.fr{display:flex;align-items:center;gap:6px;padding:6px 8px;border-radius:8px;cursor:pointer}.fr:hover{background:var(--c)}
+.fr.on{background:var(--ac);color:#fff}.fr .n{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.fr .c{font-size:11px;opacity:.7}
+.fr button{padding:0 4px;border:0;background:transparent;color:inherit}
+@media(max-width:700px){.wrap{flex-direction:column}aside{width:100%;position:static}}

@@ -44,7 +44,7 @@ const lib = (() => {
       const t = d.transaction(['items', 'folders'], 'readwrite'), I = t.objectStore('items'), F = t.objectStore('folders');
       const hit = p => p === from || p.startsWith(from + '/'), map = p => hit(p) ? mapper(p) : p;
       F.getAllKeys().onsuccess = e => { for (const p of e.target.result) if (hit(p)) { F.delete(p); ancestors(map(p)).forEach(a => F.put({ path: a })); } };
-      I.getAll().onsuccess = e => { for (const i of e.target.result) { const f = i.folder || 'General', n = map(f); if (n !== i.folder) { i.folder = n; I.put(i); } } };
+      I.getAll().onsuccess = e => { for (const i of e.target.result) { const f = i.folders || [i.folder || 'General'], n = [...new Set(f.map(map))]; if (JSON.stringify(n) !== JSON.stringify(i.folders)) { i.folders = n; delete i.folder; I.put(i); } } };
       t.oncomplete = () => { d.close(); res(); };
       t.onerror = () => rej(t.error);
     });

@@ -9,3 +9,16 @@ FOLDERS: every bookmark lives in a folder (default "General"). Create/rename/del
 BACKUP: Export backup button in the library (save it in a Google Drive folder).
 
 Folders are real links: middle-click or Ctrl+click opens a folder in a new tab (sidebar, folder icons, breadcrumb). The folder ⋮ menu also has "Open in new tab".
+
+SELECT: click the Select button (between ＋ and ⋮) to show checkboxes; tick bookmarks / folders, then use Copy to / Move to / Delete in the bar. Done or Esc leaves select mode.
+SAVING: the save box lets you tick several folders at once.
+
+CONTEXT MENU: right-click -> Bookmarking Extension. 'Save to my library ★' is filled when the page is already saved. Snapshot / timestamp entries show a count; hover for the list, click one to jump the video there.
+CAPTURE PANEL: Alt+S / Alt+T open a panel that stays open so you can take many snapshots and add many moments; close it with ✕ or Esc.
+SIDEBAR: drag the divider to resize (double-click resets), or use the round arrow on it to hide/show the sidebar.
+
+UPDATING WITHOUT LOSING DATA: your library lives inside Chrome, attached to this extension. Removing the extension deletes it.
+ 1. Export backup (library page) before any update.
+ 2. Unzip the new version OVER the same folder, then click the refresh icon on the extension at chrome://extensions. Do NOT click Remove.
+ 3. Keep the "key" line in manifest.json: it keeps the extension ID, and therefore your data, the same.
+If the library is ever empty, click Import and choose your backup file.

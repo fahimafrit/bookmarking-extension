@@ -1,16 +1,61 @@
 importScripts('db.js');
 const LIB = chrome.runtime.getURL('library.html');
 
-chrome.runtime.onInstalled.addListener(() => chrome.contextMenus.removeAll(() => {
-  const m = (id, title, contexts) => chrome.contextMenus.create({ id, title, contexts });
-  m('save', 'Save to my library', ['page', 'image', 'video']);
-  m('snap', 'Take video snapshot', ['page', 'video']);
-  m('moment', 'Mark timestamp', ['page', 'video']);
-  m('lib', 'Open my library', ['action']);
-}));
+const STAR = '★', OUTLINE = '☆';
+const tfmt = s => { s = Math.floor(s); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = String(s % 60).padStart(2, '0'); return h ? `${h}:${String(m).padStart(2, '0')}:${x}` : `${m}:${x}`; };
+const cut = (s, n) => (s.length > n ? s.slice(0, n - 1) + '…' : s).replace(/&/g, '&&');
+let menuTimer = 0, menuChain = Promise.resolve();
+function refresh() { clearTimeout(menuTimer); menuTimer = setTimeout(() => { menuChain = menuChain.then(buildMenu).catch(console.error); }, 120); }
+
+async function buildMenu() {
+  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  const it = tab && /^https?:/.test(tab.url || '') ? await lib.get(norm(tab.url)) : null;
+  const snaps = [...(it ? it.snaps : [])].sort((a, b) => (a.t ?? 1e9) - (b.t ?? 1e9));
+  const mos = [...(it ? it.moments : [])].sort((a, b) => a.start - b.start);
+  await new Promise(r => chrome.contextMenus.removeAll(r));
+  const ctx = ['page', 'video'], c = o => chrome.contextMenus.create(o);
+  c({ id: 'save', title: 'Save to my library ' + (it ? STAR : OUTLINE), contexts: ctx });
+  c({ id: 'saveimg', title: 'Save image to my library ' + OUTLINE, contexts: ['image'] });
+  const group = (key, title, action, list, label, time) => {
+    if (!list.length) return c({ id: action, title: `${title} (0)`, contexts: ctx });
+    c({ id: key, title: `${title} (${list.length})`, contexts: ctx });
+    c({ id: action, parentId: key, title: key === 'snapg' ? '📷  Take snapshot now' : '⏱  Mark timestamp now', contexts: ctx });
+    c({ id: key + ':sep', parentId: key, type: 'separator', contexts: ctx });
+    list.slice(0, 15).forEach(e => c({ id: `go:${key === 'snapg' ? 's' : 'm'}:${e.id}`, parentId: key, title: label(e), enabled: time(e) != null, contexts: ctx }));
+    if (list.length > 15) c({ id: 'more:' + key, parentId: key, title: `…${list.length - 15} more in the library`, contexts: ctx });
+  };
+  group('snapg', 'Take video snapshot', 'snap', snaps, e => e.t != null ? '📷  ' + tfmt(e.t) : '📷  screenshot (no time)', e => e.t);
+  group('momg', 'Mark timestamp', 'moment', mos, e => `${tfmt(e.start)}${e.end != null ? '–' + tfmt(e.end) : ''}${e.note ? '      ' + cut(e.note, 40) : ''}`, e => e.start);
+  c({ id: 'lib', title: 'Open my library', contexts: ['action'] });
+}
+chrome.runtime.onInstalled.addListener(refresh);
+chrome.runtime.onStartup.addListener(refresh);
+chrome.tabs.onActivated.addListener(refresh);
+chrome.windows.onFocusChanged.addListener(refresh);
+chrome.tabs.onUpdated.addListener((id, ch, tab) => { if (tab.active && (ch.url || ch.status === 'complete')) refresh(); });
+
+function seek(t) {
+  const v = [...document.querySelectorAll('video')].sort((a, b) => b.clientWidth * b.clientHeight - a.clientWidth * a.clientHeight)[0];
+  if (v) v.currentTime = t;
+}
+async function goTo(id, tab) {
+  try {
+    const [, kind, eid] = id.split(':');
+    const [{ result: p }] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: pageInfo });
+    const it = await lib.get(norm(p.url)); if (!it) return;
+    const e = (kind === 's' ? it.snaps : it.moments).find(x => x.id === eid); if (!e) return;
+    const t = kind === 's' ? e.t : e.start; if (t == null) return;
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: seek, args: [t] });
+  } catch (e) { console.error(e); flash(tab && tab.id, false); }
+}
 
 chrome.action.onClicked.addListener(openLib);
-chrome.contextMenus.onClicked.addListener((i, tab) => run(i.menuItemId, tab, i));
+chrome.contextMenus.onClicked.addListener((i, tab) => {
+  const id = String(i.menuItemId);
+  if (id.startsWith('go:')) return goTo(id, tab);
+  if (id.startsWith('more:')) return openLib();
+  run(id === 'saveimg' ? 'save' : id, tab, i);
+});
 chrome.commands.onCommand.addListener((c, tab) =>
   run({ 'save-bookmark': 'save', 'take-snapshot': 'snap', 'mark-timestamp': 'moment' }[c], tab));
 
@@ -33,72 +78,121 @@ function pageInfo() {
   return { title: document.title, url: location.href, og: m('og:image') || m('twitter:image'), t: v ? v.currentTime : null, ct: document.contentType || '' };
 }
 
-function grab() {
-  try {
-    const v = [...document.querySelectorAll('video')].filter(v => v.readyState > 1 && v.videoWidth)
-      .sort((a, b) => b.clientWidth * b.clientHeight - a.clientWidth * a.clientHeight)[0];
-    if (!v) return null;
-    const c = document.createElement('canvas'), k = Math.min(1, 1280 / v.videoWidth);
-    c.width = v.videoWidth * k; c.height = v.videoHeight * k;
-    c.getContext('2d').drawImage(v, 0, 0, c.width, c.height);
-    return { img: c.toDataURL('image/jpeg', 0.85), t: v.currentTime };
-  } catch (e) { return null; }
-}
-
 function ui(mode, d) {
-  document.getElementById('vl-host')?.remove();
-  const host = document.createElement('div'); host.id = 'vl-host';
+  const old = document.getElementById('vl-host');
+  if (mode === 'cap' && old && old._api && old.dataset.id === d.id) { old._api.run(d.auto); return; }
+  if (old) old.remove();
+  const host = document.createElement('div'); host.id = 'vl-host'; host.dataset.id = d.id;
   host.style.cssText = 'position:fixed;top:16px;right:16px;z-index:2147483647';
-  const r = host.attachShadow({ mode: 'open' }), mo = mode === 'mo';
+  const r = host.attachShadow({ mode: 'open' }), cap = mode === 'cap';
   const fmt = s => { s = Math.floor(s); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = String(s % 60).padStart(2, '0'); return h ? `${h}:${String(m).padStart(2, '0')}:${x}` : `${m}:${x}`; };
-  const vid = () => [...document.querySelectorAll('video')].sort((a, b) => b.clientWidth * b.clientHeight - a.clientWidth * a.clientHeight)[0];
+  const bySize = (a, b) => b.clientWidth * b.clientHeight - a.clientWidth * a.clientHeight;
+  const vid = () => [...document.querySelectorAll('video')].sort(bySize)[0];
   const p = x => { x = x.trim(); if (!x) return null; const a = x.split(':').map(Number); return a.some(isNaN) ? NaN : a.reduce((t, v) => t * 60 + v, 0); };
+  const BM = `<b>🔖 Save bookmark</b>
+  <label>Note<input type=text id=n></label>
+  <div class=lab>Folders (tick one or more)</div><div class=fl id=fl></div><button type=button id=nfb>＋ New folder…</button>
+  <div id=nr style="display:none;flex-direction:column;gap:6px"><input type=text id=fn placeholder="New folder name"><div class=row><select id=fp></select><button type=button id=na>Add</button></div></div>
+  <div class=row><button id=ok>Save</button><button id=no>Cancel</button></div>`;
+  const CAP = `<div class=hd><b>🎬 Capture</b><span class=m id=cnt></span><button id=x title="Close">✕</button></div>
+  <button id=snap>📷 Take snapshot</button>
+  <div class=lab>Mark a moment</div>
+  <div class=row><label>Start<input type=text id=s></label><button id=ns title="Start = current time">now</button><label>End (optional)<input type=text id=e placeholder="e.g. 2:10"></label><button id=ne title="End = current time">now</button></div>
+  <label>Note<input type=text id=n></label>
+  <button id=ok>＋ Add moment</button><div class=log id=log></div>`;
   r.innerHTML = `<style>
-  .b{font:14px system-ui,sans-serif;background:#1f2430;color:#eee;padding:14px;border-radius:12px;width:320px;box-shadow:0 8px 30px #0008;display:flex;flex-direction:column;gap:8px}
+  .b{font:14px system-ui,sans-serif;background:#1f2430;color:#eee;padding:14px;border-radius:12px;width:340px;box-shadow:0 8px 30px #0008;display:flex;flex-direction:column;gap:8px}
   label{display:flex;flex-direction:column;gap:3px;font-size:12px;color:#aab;flex:1}
   input[type=text],select{background:#12151c;border:1px solid #3a4152;color:#fff;border-radius:6px;padding:6px 8px;font-size:14px;width:100%;box-sizing:border-box}
   .bad{border-color:#f55!important}.row{display:flex;gap:8px;align-items:flex-end}
   button{border:0;border-radius:6px;padding:7px 12px;cursor:pointer;background:#3a4152;color:#fff}#ok{background:#6366f1}
-  </style><div class=b><b>${mo ? '⏱ Mark timestamp' : '🔖 Save bookmark'}</b>
-  ${mo ? '<div class=row><label>Start<input type=text id=s></label><label>End (optional)<input type=text id=e placeholder="e.g. 2:10"></label><button id=now title="End = current time">now</button></div>' : ''}
-  <label>Note<input type=text id=n></label>
-  ${mo ? '' : '<label>Folder<select id=f></select></label><input type=text id=fn placeholder="New folder name" style="display:none"><select id=fp style="display:none"></select>'}
-  <div class=row><button id=ok>Save</button><button id=no>Cancel</button></div></div>`;
+  .lab,.m{font-size:12px;color:#aab}.hd{display:flex;align-items:center;gap:8px}.hd b{flex:1}#x{background:transparent;padding:2px 8px}
+  .log{max-height:110px;overflow:auto;font-size:12px;color:#aab;display:flex;flex-direction:column;gap:2px}.log:empty{display:none}
+  .fl{max-height:150px;overflow:auto;background:#12151c;border:1px solid #3a4152;border-radius:6px;padding:4px}
+  .fi{display:flex;flex-direction:row;align-items:center;gap:6px;font-size:13px;color:#dde;padding:3px 4px;border-radius:4px;cursor:pointer}.fi:hover{background:#2a3040}
+  </style><div class=b>${cap ? CAP : BM}</div>`;
   const g = i => r.getElementById(i);
-  if (mo && d.t != null) g('s').value = fmt(d.t);
-  if (!mo) {
-    g('n').value = d.notes || '';
-    const sel = g('f');
-    for (const q of d.folders) { const o = document.createElement('option'), s = q.split('/'); o.value = q; o.textContent = '\u2003'.repeat(s.length - 1) + (s.length > 1 ? '↳ ' : '📁 ') + s[s.length - 1]; sel.append(o); }
-    const nw = document.createElement('option'); nw.value = '__new'; nw.textContent = '➕ New folder…'; sel.append(nw);
-    sel.value = d.folder;
-    const fp = g('fp'), t0 = document.createElement('option'); t0.value = ''; t0.textContent = '— create at top level —'; fp.append(t0);
-    for (const z of d.folders) { const o = document.createElement('option'); o.value = z; o.textContent = 'inside: ' + z; fp.append(o); }
-    sel.onchange = () => { const n = sel.value === '__new'; g('fn').style.display = fp.style.display = n ? '' : 'none'; if (n) g('fn').focus(); };
-  }
   const close = () => host.remove();
-  if (mo) g('now').onclick = () => { const v = vid(); if (v) g('e').value = fmt(v.currentTime); };
-  g('no').onclick = close;
-  const save = () => {
-    const note = g('n').value.trim();
-    if (!mo) {
-      let folder = g('f').value;
-      if (folder === '__new') { const t = g('fn').value.trim(), par = g('fp').value; folder = !t ? 'General' : (par && !t.startsWith('/') ? par + '/' + t : t); }
-      chrome.runtime.sendMessage({ k: 'bm', id: d.id, notes: note, folder, from: d.folder }); return close();
-    }
-    const s = p(g('s').value), e = p(g('e').value);
-    const badS = s == null || isNaN(s), badE = isNaN(e);
-    g('s').classList.toggle('bad', badS); g('e').classList.toggle('bad', badE);
-    if (badS || badE) return;
-    chrome.runtime.sendMessage({ k: 'mo', id: d.id, start: s, end: e, note }); close();
-  };
-  g('ok').onclick = save;
+  let save, addF = () => {};
+
+  if (cap) {
+    let snaps = d.snapCount || 0, mos = d.moCount || 0;
+    const cnt = () => { g('cnt').textContent = `📷 ${snaps} · ⏱ ${mos}`; };
+    const log = t => { const l = document.createElement('div'); l.textContent = t; g('log').prepend(l); while (g('log').children.length > 8) g('log').lastChild.remove(); };
+    const nowT = () => { const v = vid(); return v ? v.currentTime : null; };
+    const setNow = id => { const t = nowT(); if (t != null) g(id).value = fmt(t); };
+    const grab = () => {
+      try {
+        const v = [...document.querySelectorAll('video')].filter(v => v.readyState > 1 && v.videoWidth).sort(bySize)[0]; if (!v) return null;
+        const c = document.createElement('canvas'), k = Math.min(1, 1280 / v.videoWidth);
+        c.width = v.videoWidth * k; c.height = v.videoHeight * k;
+        c.getContext('2d').drawImage(v, 0, 0, c.width, c.height);
+        return { img: c.toDataURL('image/jpeg', 0.85), t: v.currentTime };
+      } catch (e) { return null; }
+    };
+    const snap = async () => {
+      const r0 = grab();
+      if (r0) { chrome.runtime.sendMessage({ k: 'sn', id: d.id, t: r0.t, img: r0.img }); snaps++; cnt(); log('📷 ' + fmt(r0.t)); return; }
+      const t = nowT();
+      host.style.visibility = 'hidden';
+      await new Promise(res => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(res, 60))));
+      let ok = false; try { ok = (await chrome.runtime.sendMessage({ k: 'snv', id: d.id, t })).ok; } catch (e) {}
+      host.style.visibility = 'visible';
+      if (ok) { snaps++; cnt(); log('📷 ' + (t != null ? fmt(t) : 'screenshot')); } else log('⚠ Snapshot failed');
+    };
+    const mark = () => { setNow('s'); g('n').focus(); };
+    save = () => {
+      const s = p(g('s').value), e = p(g('e').value), note = g('n').value.trim();
+      const badS = s == null || isNaN(s), badE = isNaN(e);
+      g('s').classList.toggle('bad', badS); g('e').classList.toggle('bad', badE);
+      if (badS || badE) return;
+      chrome.runtime.sendMessage({ k: 'mo', id: d.id, start: s, end: e, note });
+      mos++; cnt(); log(`⏱ ${fmt(s)}${e != null ? ' → ' + fmt(e) : ''}${note ? '   ' + note : ''}`);
+      g('e').value = ''; g('n').value = ''; setNow('s'); g('n').focus();
+    };
+    host._api = { run: a => { if (a === 'snap') snap(); else mark(); } };
+    g('snap').onclick = snap; g('ns').onclick = () => setNow('s'); g('ne').onclick = () => setNow('e');
+    g('ok').onclick = save; g('x').onclick = close;
+    cnt(); setNow('s');
+    if (d.auto === 'snap') snap(); else g('n').focus();
+  } else {
+    const picked = new Set(d.folderSel || []), allF = [...d.folders];
+    const cmp = (x, y) => { const p = x.split('/'), q = y.split('/'); for (let i = 0; i < Math.min(p.length, q.length); i++) if (p[i] !== q[i]) { if (!i && p[0] === 'General') return -1; if (!i && q[0] === 'General') return 1; return p[i].localeCompare(q[i]); } return p.length - q.length; };
+    const drawF = () => g('fl').replaceChildren(...allF.map(q => {
+      const s = q.split('/'), l = document.createElement('label'), c = document.createElement('input');
+      l.className = 'fi'; c.type = 'checkbox'; c.checked = picked.has(q);
+      c.onchange = () => { if (c.checked) picked.add(q); else picked.delete(q); };
+      l.style.paddingLeft = (4 + (s.length - 1) * 16) + 'px';
+      l.append(c, (s.length > 1 ? '↳ ' : '📁 ') + s[s.length - 1]); return l;
+    }));
+    g('n').value = d.notes || '';
+    drawF();
+    const fp = g('fp'), t0 = document.createElement('option'); t0.value = ''; t0.textContent = '— at top level —'; fp.append(t0);
+    for (const z of d.folders) { const o = document.createElement('option'); o.value = z; o.textContent = 'inside: ' + z; fp.append(o); }
+    g('nfb').onclick = () => { g('nr').style.display = 'flex'; g('nfb').style.display = 'none'; g('fn').focus(); };
+    addF = () => {
+      const t = g('fn').value.trim(), par = g('fp').value; if (!t) return;
+      const path = (par && !t.startsWith('/') ? par + '/' + t : t).split('/').map(x => x.trim()).filter(Boolean).join('/'); if (!path) return;
+      const ex = allF.find(x => x.toLowerCase() === path.toLowerCase()), use = ex || path;
+      if (!ex) { allF.push(use); allF.sort(cmp); }
+      picked.add(use); g('fn').value = ''; drawF();
+    };
+    g('na').onclick = addF;
+    save = () => {
+      if (g('fn').value.trim()) addF();
+      chrome.runtime.sendMessage({ k: 'bm', id: d.id, notes: g('n').value.trim(), folders: [...picked] }); close();
+    };
+    g('ok').onclick = save; g('no').onclick = close;
+  }
   for (const ev of ['keydown', 'keyup', 'keypress']) host.addEventListener(ev, x => {
     x.stopPropagation();
-    if (ev === 'keydown') { if (x.key === 'Enter') save(); if (x.key === 'Escape') close(); }
+    if (ev !== 'keydown') return;
+    const act = r.activeElement;
+    if (x.key === 'Enter' && !(act && act.tagName === 'BUTTON')) { if (act && act.id === 'fn') addF(); else save(); }
+    if (x.key === 'Escape') close();
   });
   document.documentElement.append(host);
-  g(mo ? (d.t != null ? 'n' : 's') : 'n').focus();
+  if (cap) { if (d.auto !== 'snap') g('n').focus(); } else g('n').focus();
 }
 
 const abs = (o, b) => { try { return o ? new URL(o, b).href : ''; } catch { return ''; } };
@@ -138,27 +232,32 @@ async function run(cmd, tab, info = {}) {
     const it = await ensure(p, info);
     if (!Array.isArray(it.folders)) { it.folders = [it.folder || 'General']; delete it.folder; await lib.put(it); }
     const show = (mode, d) => chrome.scripting.executeScript({ target: { tabId: tab.id }, func: ui, args: [mode, d] });
-    if (cmd === 'save') await show('bm', { id: it.id, notes: it.notes, folders: await lib.folders(), folder: it.folders[0] });
-    if (cmd === 'moment') await show('mo', { id: it.id, t: p.t });
-    if (cmd === 'snap') {
-      const [{ result: r0 }] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: grab });
-      const r = r0 || { img: await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'jpeg', quality: 80 }), t: null };
-      it.snaps.push({ id: crypto.randomUUID(), t: r.t, img: r.img, at: Date.now() });
-      await lib.put(it); flash(tab.id);
-    }
+    if (cmd === 'save') await show('bm', { id: it.id, notes: it.notes, folders: await lib.folders(), folderSel: it.folders });
+    if (cmd === 'moment' || cmd === 'snap') await show('cap', { id: it.id, t: p.t, auto: cmd === 'snap' ? 'snap' : 'mark', snapCount: it.snaps.length, moCount: it.moments.length });
   } catch (e) { console.error(e); flash(tab && tab.id, false); }
 }
 
-chrome.runtime.onMessage.addListener((m, s) => {
+chrome.runtime.onMessage.addListener((m, s, send) => {
+  if (m.k === 'changed') { refresh(); return; }
   (async () => {
-    const it = await lib.get(m.id); if (!it) return;
+    const it = await lib.get(m.id); if (!it) return send({ ok: false });
     if (!Array.isArray(it.folders)) { it.folders = [it.folder || 'General']; delete it.folder; }
     if (m.k === 'bm') {
       it.notes = m.notes;
-      const f = await lib.addFolder(m.folder), i = it.folders.indexOf(m.from);
-      if (!it.folders.includes(f)) { if (i >= 0) it.folders[i] = f; else it.folders.push(f); }
+      const fs = []; for (const f of m.folders || []) fs.push(await lib.addFolder(f));
+      const set = [...new Set(fs.length ? fs : ['General'])];
+      it.folders = set.filter(f => !set.some(g => g !== f && g.startsWith(f + '/')));
     }
     if (m.k === 'mo') it.moments.push({ id: crypto.randomUUID(), start: m.start, end: m.end, note: m.note });
-    await lib.put(it); flash(s.tab && s.tab.id);
+    if (m.k === 'sn') it.snaps.push({ id: crypto.randomUUID(), t: m.t, img: m.img, at: Date.now() });
+    if (m.k === 'snv') {
+      try {
+        const img = await chrome.tabs.captureVisibleTab(s.tab.windowId, { format: 'jpeg', quality: 80 });
+        it.snaps.push({ id: crypto.randomUUID(), t: m.t, img, at: Date.now() });
+      } catch (e) { console.error(e); return send({ ok: false }); }
+    }
+    await lib.put(it); flash(s.tab && s.tab.id); refresh();
+    if (m.k === 'snv') send({ ok: true });
   })();
+  return m.k === 'snv';
 });

@@ -3,13 +3,43 @@
   "name": "Bookmarking Extension",
   "version": "1.0.0",
   "description": "Personal library for videos, images, GIFs and pages with tags, snapshots and timestamps.",
-  "permissions": ["contextMenus", "activeTab", "scripting", "unlimitedStorage"],
-  "background": { "service_worker": "background.js" },
-  "action": { "default_title": "Open my library" },
-  "icons": { "16": "icons/16.png", "48": "icons/48.png", "128": "icons/128.png" },
+  "permissions": [
+    "contextMenus",
+    "activeTab",
+    "scripting",
+    "tabs",
+    "unlimitedStorage"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Open my library"
+  },
+  "icons": {
+    "16": "icons/16.png",
+    "48": "icons/48.png",
+    "128": "icons/128.png"
+  },
   "commands": {
-    "save-bookmark": { "suggested_key": { "default": "Alt+B" }, "description": "Save this page/video to my library" },
-    "take-snapshot": { "suggested_key": { "default": "Alt+S" }, "description": "Take a video snapshot" },
-    "mark-timestamp": { "suggested_key": { "default": "Alt+T" }, "description": "Mark a timestamp" }
-  }
+    "save-bookmark": {
+      "suggested_key": {
+        "default": "Alt+B"
+      },
+      "description": "Save this page/video to my library"
+    },
+    "take-snapshot": {
+      "suggested_key": {
+        "default": "Alt+S"
+      },
+      "description": "Take a video snapshot"
+    },
+    "mark-timestamp": {
+      "suggested_key": {
+        "default": "Alt+T"
+      },
+      "description": "Mark a timestamp"
+    }
+  },
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA7eeRNZbvSRdgb+g8chKgzY7fC1xPdw/rgTFavs9Hu+hmpxLgcTXvh8CB9CM8d/uxaWpRFxyPdr0Qk6xFvN7wv+GjG9u5OfT7an6VQYmsF8v093eO/Q4SSYHfK5+zljPSA4W8RpFC7WN+79sH9K/UoMIGairnjfbc6IUbunBKrnQkR8zX4h7TbrEs7o7i2w3EZM1omGBNTPFRXGvshfIhfzzleGy1iyRojtcft7aFRsgZ84ESRWkwHSEoOkvsNqq1b8J9eyWKQbqfOUDStMfiJyas30hYVOSQ9uPjLl1P6bl6wnY5buFonpcXkJe/gSXkfbSHlkTzOhOjonBFEb3o6wIDAQAB"
 }

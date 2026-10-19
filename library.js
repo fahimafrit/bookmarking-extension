@@ -49,17 +49,19 @@ function nextToward() {
 const sel = new Set();
 let selMode = false;
 const picking = () => selMode;
-function setSelMode(on) { selMode = on; if (!on) sel.clear(); render(); }
-function toggleSel(k) { if (sel.has(k)) sel.delete(k); else sel.add(k); render(); }
+const BIN = '\u0001bin';
+let bin = [], sbSel = null, ctx = 'main', clip = null, view = { subs: [], f: [] };
+function setSelMode(on) { selMode = on; if (on) { ctx = 'main'; sbSel = null; } else sel.clear(); render(); }
+function toggleSel(k) { ctx = 'main'; sbSel = null; if (sel.has(k)) sel.delete(k); else sel.add(k); render(); }
 const cbx = k => el('input', { type: 'checkbox', class: 'cbx', checked: sel.has(k), onclick: e => { e.stopPropagation(); toggleSel(k); } });
 const CHEV = '<svg viewBox="0 0 24 24"><path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 const fHref = p => p ? 'library.html?f=' + encodeURIComponent(p) : 'library.html';
 const plain = e => !(e.ctrlKey || e.metaKey || e.shiftKey);
-const nav = p => e => { if (plain(e)) { e.preventDefault(); folder = p; render(); } };
+const nav = p => e => { if (plain(e)) { e.preventDefault(); goTo(p); } };
 const openTab = (p, active = true) => chrome.tabs.create({ url: chrome.runtime.getURL(fHref(p)), active });
 const rowProps = (p, cls) => ({
   class: cls,
-  onclick: e => { if (plain(e)) { folder = p; render(); } },
+  onclick: e => { if (plain(e)) goTo(p); },
   onauxclick: e => { if (e.button === 1 && !e.target.closest('a')) { e.preventDefault(); openTab(p, false); } },
   onmousedown: e => { if (e.button === 1 && !e.target.closest('a')) e.preventDefault(); },
 });
@@ -68,7 +70,8 @@ const lbl = p => { const s = p.split('/'); return '\u2003'.repeat(s.length - 1) 
 
 async function load() {
   items = await lib.all(); folders = await lib.folders();
-  if (folder && !folders.includes(folder)) folder = '';
+  bin = await lib.binAll();
+  if (folder && folder !== BIN && !folders.includes(folder)) folder = '';
   for (const i of items) if (!Array.isArray(i.folders) || 'tags' in i) {
     if (!Array.isArray(i.folders)) i.folders = [i.folder || 'General'];
     delete i.folder; delete i.tags; (i.moments || []).forEach(m => delete m.tags); await lib.put(i);
@@ -80,20 +83,265 @@ async function load() {
 
 const normF = a => [...new Set(a)].filter(f => !a.some(g => g !== f && g.startsWith(f + '/')));
 const moveFolders = (it, t) => normF([...(folder && it.folders.some(f => inF(f, folder)) ? it.folders.filter(f => !inF(f, folder)) : []), t]);
-async function addTo(i, p) { i.folders = normF([...i.folders, p]); await lib.put(i); load(); }
-async function moveTo(i, p) {
-  i.folders = moveFolders(i, p); await lib.put(i); load();
-}
-async function createIn(parent) {
-  const name = await ask({ title: 'New folder', message: parent ? `Inside "${parent}". Start with / for a top-level folder, or use / to nest further.` : 'Use / to create nested folders.', input: { placeholder: 'Folder name' }, ok: 'Create' });
-  if (!name || !name.trim()) return null;
-  const raw = name.split('/').map(x => x.trim()).filter(Boolean).join('/'); if (!raw) return null;
-  return lib.addFolder(parent && !name.trim().startsWith('/') ? parent + '/' + raw : raw);
+const uid = () => crypto.randomUUID();
+const leaf = p => p.split('/').pop();
+const qt = s => { s = String(s); return '"' + (s.length > 40 ? s.slice(0, 39) + '…' : s) + '"'; };
+const tn = t => qt(t ? leaf(t) : 'All bookmarks');
+const idsFor = (ids, fl) => [...new Set([...ids, ...items.filter(i => fl.some(p => inTree(i, p))).map(i => i.id)])];
+const keyItems = ks => ks.filter(k => k[0] === 'i').map(k => items.find(i => i.id === k.slice(2))).filter(Boolean);
+const keyFolders = ks => { const fs = ks.filter(k => k[0] === 'f').map(k => k.slice(2)).filter(p => folders.includes(p)); return fs.filter(p => !fs.some(o => o !== p && inF(p, o))); };
+
+/* ---------- toasts ---------- */
+const tbox = el('div', { id: 'toasts' }); document.body.append(tbox);
+const live = [];
+function toast(msg, entry) {
+  if (entry) for (const o of live) if (o.btn) { o.btn.remove(); o.btn = null; }
+  const t = { btn: null };
+  t.kill = () => { clearTimeout(t.tm); const i = live.indexOf(t); if (i < 0) return; live.splice(i, 1); t.w.classList.remove('show'); setTimeout(() => t.w.remove(), 320); };
+  if (entry) t.btn = el('button', { class: 'tundo', onclick: () => { t.kill(); undo(); } }, 'Undo');
+  t.w = el('div', { class: 'tw' }, el('div', { class: 'tin' }, el('div', { class: 'tb' },
+    el('span', { class: 'tm' }, msg), t.btn, el('button', { class: 'tx', title: 'Dismiss', onclick: t.kill }, '✕'))));
+  tbox.append(t.w); live.push(t);
+  requestAnimationFrame(() => requestAnimationFrame(() => t.w.classList.add('show')));
+  t.tm = setTimeout(t.kill, entry ? 7000 : 4500);
+  while (live.length > 5) live[0].kill();
 }
 
+/* ---------- undo / redo (snapshots of only the records an action touches) ---------- */
+const undoS = [], redoS = [];
+async function snap(ids, bids) {
+  const st = { folders: await lib.folders(), items: {}, bin: {} };
+  for (const id of ids) st.items[id] = (await lib.get(id)) || null;
+  if (bids.length) { const bn = await lib.binAll(); for (const b of bids) st.bin[b] = bn.find(x => x.bid === b) || null; }
+  return st;
+}
+async function restoreSt(st) {
+  await lib.setFolders(st.folders);
+  for (const [id, v] of Object.entries(st.items)) { if (v) await lib.put(v); else await lib.del(id); }
+  for (const [b, v] of Object.entries(st.bin)) { if (v) await lib.binPut(v); else await lib.binDel(b); }
+}
+async function doAct(ids, bids, fn) {
+  const before = await snap(ids, bids), made = [];
+  let msg;
+  try { msg = await fn(made); } catch (e) { console.error(e); toast('Something went wrong'); await load(); return; }
+  if (msg == null) { await load(); return; }
+  const after = await snap(ids, [...new Set([...bids, ...made])]);
+  for (const b of made) if (!(b in before.bin)) before.bin[b] = null;
+  const entry = { msg, before, after };
+  undoS.push(entry); if (undoS.length > 30) undoS.shift(); redoS.length = 0;
+  await load(); toast(msg, entry);
+}
+async function undo() { const e = undoS.pop(); if (!e) return; await restoreSt(e.before); redoS.push(e); await load(); toast('Undone: ' + e.msg); }
+async function redo() { const e = redoS.pop(); if (!e) return; await restoreSt(e.after); undoS.push(e); await load(); toast('Redone: ' + e.msg); }
+function updUR() {
+  const u = undoS[undoS.length - 1], r = redoS[redoS.length - 1];
+  $('#undo').disabled = !u; $('#redo').disabled = !r;
+  $('#undo').title = u ? `Undo: ${u.msg} (Ctrl+Z)` : 'Nothing to undo'; $('#redo').title = r ? `Redo: ${r.msg} (Ctrl+Y)` : 'Nothing to redo';
+}
+
+/* ---------- actions ---------- */
+async function addTo(i, p) {
+  await doAct([i.id], [], async () => { const c = await lib.get(i.id); if (!c) return null; c.folders = normF([...c.folders, p]); await lib.put(c); return `${qt(c.title)} copied to ${tn(p)}`; });
+}
+async function moveTo(i, p) {
+  await doAct([i.id], [], async () => { const c = await lib.get(i.id); if (!c) return null; c.folders = moveFolders(c, p); await lib.put(c); return `${qt(c.title)} moved to ${tn(p)}`; });
+}
+async function createFolderAct(full) {
+  let out = null;
+  await doAct([], [], async () => {
+    const ex = folders.some(f => f.toLowerCase() === full.toLowerCase());
+    out = await lib.addFolder(full);
+    return ex ? null : `Folder ${qt(leaf(out))} created`;
+  });
+  return out;
+}
+function createIn(parent) {
+  return new Promise(res => {
+    const d = $('#modal'); let done = false, choice = parent || '';
+    const fin = v => { if (done) return; done = true; d.close(); res(v); };
+    const inp = el('input', { type: 'text', placeholder: 'Folder name' });
+    const sg = choice ? choice.split('/') : [];
+    const tb = treeBox({ rootOption: true, isOn: p => choice === p, onPick: p => { choice = p; tb.draw(); }, openInit: sg.slice(0, -1).map((_, i) => sg.slice(0, i + 1).join('/')) });
+    const create = async () => {
+      const n = inp.value.split('/').map(x => x.trim()).filter(Boolean).join('/'); if (!n) { inp.focus(); return; }
+      if (done) return; done = true; d.close();
+      res(await createFolderAct(choice ? choice + '/' + n : n));
+    };
+    d.replaceChildren(el('h3', {}, 'New folder'), inp, el('div', { class: 'm', style: 'margin:10px 0 4px' }, 'Place it inside:'), tb.box,
+      el('div', { class: 'mb' }, el('button', { onclick: () => fin(null) }, 'Cancel'), el('button', { class: 'primary', onclick: create }, 'Create')));
+    d.onkeydown = e => { if (e.key === 'Enter' && e.target.tagName !== 'BUTTON') { e.preventDefault(); create(); } };
+    d.oncancel = e => { e.preventDefault(); fin(null); };
+    d.onclick = e => { if (e.target === d) fin(null); };
+    tb.draw(); d.showModal(); inp.focus();
+  });
+}
+async function goTo(p) {
+  if (p === folder) return;
+  if (sel.size) {
+    const ok = await ask({ title: 'Leave this folder?', message: `Your ${sel.size} selected item${sel.size > 1 ? 's' : ''} will be deselected. Selection works inside one folder at a time.`, ok: 'Leave and deselect' });
+    if (!ok) return;
+    sel.clear(); selMode = false;
+  }
+  folder = p; render();
+}
+async function dropMove(it, p) {
+  if (it.folders.includes(p)) return;
+  if (!await ask({ title: 'Move bookmark', message: `Move ${qt(it.title)} to ${tn(p)}?`, ok: 'Move' })) return;
+  moveTo(it, p);
+}
+function cancelClip() { const c = clip; if (!c) return; clip = null; render(); toast(c.mode === 'cut' ? 'Cut cancelled' : 'Copy cancelled'); }
+async function renameItem(i) {
+  const name = await ask({ title: 'Rename bookmark', input: { value: i.title }, ok: 'Rename' });
+  const n = (name || '').trim(); if (!n || n === i.title) return;
+  await doAct([i.id], [], async () => { const c = await lib.get(i.id); if (!c) return null; c.title = n; await lib.put(c); return `${qt(i.title)} renamed to ${qt(n)}`; });
+}
+async function trashSel(its, fl) {
+  const n = its.length + fl.length; if (!n) return;
+  const what = n === 1 ? (its.length ? qt(its[0].title) + ' will be moved to the recycle bin.' : `Folder ${qt(leaf(fl[0]))} will be moved to the recycle bin. Its bookmarks move up to ${tn(parentOf(fl[0]) || 'General')}.`) : `${n} items will be moved to the recycle bin.`;
+  if (!await ask({ title: 'Move to recycle bin?', message: what + ' You can restore them from the bin.', ok: 'Move to bin', warn: true })) return;
+  let note = '';
+  await doAct(idsFor(its.map(i => i.id), fl), [], async made => {
+    for (const f of fl) {
+      const par = parentOf(f) || 'General', tree = folders.filter(x => inF(x, f));
+      const aff = items.filter(i => inTree(i, f)).map(i => ({ id: i.id, folders: [...i.folders] }));
+      await lib.removeFolder(f);
+      const bid = uid(); await lib.binPut({ bid, kind: 'folder', at: Date.now(), path: f, tree, aff, par }); made.push(bid);
+      if (inF(folder, f)) folder = par;
+      if (n === 1 && aff.length) note = ` · its bookmarks moved to ${tn(par)}`;
+    }
+    for (const i of its) {
+      const c = await lib.get(i.id); if (!c) continue;
+      await lib.del(i.id); const bid = uid(); await lib.binPut({ bid, kind: 'item', at: Date.now(), item: c }); made.push(bid);
+    }
+    sel.clear(); sbSel = null;
+    return `${n === 1 ? qt(its.length ? its[0].title : leaf(fl[0])) : n + ' items'} moved to bin` + note;
+  });
+}
+const binName = e => e.kind === 'item' ? e.item.title : leaf(e.path);
+async function restoreBin(e) {
+  if (!await ask({ title: 'Restore from bin?', message: `Restore ${qt(binName(e))}?`, ok: 'Restore' })) return;
+  await doAct(e.kind === 'item' ? [e.item.id] : e.aff.map(a => a.id), [e.bid], async () => {
+    if (e.kind === 'item') {
+      const fs = []; for (const f of e.item.folders) fs.push(await lib.addFolder(f));
+      const ex = await lib.get(e.item.id);
+      if (ex) { ex.folders = normF([...ex.folders, ...fs]); await lib.put(ex); }
+      else { e.item.folders = normF(fs.length ? fs : ['General']); await lib.put(e.item); }
+    } else {
+      for (const t of e.tree) await lib.addFolder(t);
+      for (const a of e.aff) {
+        const c = await lib.get(a.id); if (!c) continue;
+        const keep = c.folders.filter(f => !(f === e.par && !a.folders.includes(e.par)));
+        c.folders = normF([...keep, ...a.folders.filter(f => inF(f, e.path))]); if (!c.folders.length) c.folders = ['General'];
+        await lib.put(c);
+      }
+    }
+    await lib.binDel(e.bid);
+    return `${qt(binName(e))} restored`;
+  });
+}
+async function purge(es, confirmed = false) {
+  if (!confirmed && !await ask({ title: 'Delete forever?', message: `${es.length === 1 ? qt(binName(es[0])) : es.length + ' items'} will be permanently deleted. You can still undo right afterwards.`, ok: 'Delete forever', warn: true })) return;
+  const nm = es.length === 1 ? qt(binName(es[0])) : `${es.length} items`;
+  await doAct([], es.map(e => e.bid), async () => { for (const e of es) await lib.binDel(e.bid); return `${nm} deleted permanently`; });
+}
+async function emptyBin() {
+  if (!bin.length) return;
+  if (!await ask({ title: 'Empty recycle bin', message: `Permanently delete ${bin.length} item${bin.length > 1 ? 's' : ''}? You can still undo right afterwards.`, ok: 'Empty bin', warn: true })) return;
+  purge([...bin], true);
+}
+async function transfer(kind, ids, fl0, target) {
+  const fl = fl0.filter(f => !inF(target, f));
+  if (!ids.length && !fl.length) { toast(fl0.length ? "A folder can't be placed inside itself" : 'Nothing to do'); return; }
+  const skipped = [], total = ids.length + fl.length;
+  await doAct(idsFor(ids, fl), [], async () => {
+    let okc = 0;
+    for (const f of fl) {
+      if (kind === 'copy') { await copyFolder(f, target); okc++; }
+      else if (await moveFolderTo(f, target) === 'ok') okc++; else skipped.push(f);
+    }
+    items = await lib.all(); folders = await lib.folders();
+    for (const id of ids) {
+      const it = items.find(x => x.id === id); if (!it) continue;
+      it.folders = kind === 'copy' ? normF([...it.folders, target]) : moveFolders(it, target); await lib.put(it);
+    }
+    const done = ids.length + okc;
+    if (!done) { toast(`Not moved: a folder named ${qt(leaf(skipped[0] || ''))} already exists there`); return null; }
+    const first = ids.length ? (items.find(x => x.id === ids[0]) || {}).title : leaf(fl[0]);
+    return `${total === 1 ? qt(first) : total + ' items'} ${kind === 'copy' ? 'copied' : 'moved'} to ${tn(target)}` + (skipped.length ? ` (${skipped.length} skipped: name already exists)` : '');
+  });
+}
+
+/* ---------- selection contexts: 'main' = items/folders in the big area (multi), 'side' = one row in the sidebar ---------- */
+function selectKey(k, where) {
+  if (where === 'side') { sel.clear(); selMode = false; sbSel = k; ctx = 'side'; }
+  else { sbSel = null; selMode = true; sel.add(k); ctx = 'main'; }
+  render();
+}
+const selKeys = () => ctx === 'side' && sbSel ? [sbSel] : [...sel];
+const isCut = k => clip && clip.mode === 'cut' && clip.keys.includes(k);
+async function delKeys() {
+  const ks = selKeys(), its = keyItems(ks), fl = keyFolders(ks).filter(p => p !== 'General');
+  if (!its.length && !fl.length) { if (ks.length) toast('"General" can\'t be deleted'); return; }
+  await trashSel(its, fl);
+}
+function renKey() {
+  const ks = selKeys(); if (ks.length !== 1) { if (ks.length) toast('Select one thing to rename'); return; }
+  const k = ks[0];
+  if (k[0] === 'f') { if (k.slice(2) === 'General') toast('"General" can\'t be renamed'); else renameF(k.slice(2)); }
+  else { const i = items.find(x => x.id === k.slice(2)); if (i) renameItem(i); }
+}
+function copyCut(mode) {
+  const ks = [...sel].filter(k => mode === 'copy' || k !== 'f:General');
+  if (!ks.length) { toast('"General" can\'t be cut'); return; }
+  clip = { mode, keys: ks }; sel.clear(); selMode = false; render();
+  const its = keyItems(ks), fl = keyFolders(ks), n = its.length + fl.length;
+  toast(`${n === 1 ? qt(its.length ? its[0].title : leaf(fl[0])) : n + ' items'} ${mode === 'copy' ? 'copied' : 'cut'} · open a folder and press Ctrl+V`);
+}
+async function paste() {
+  if (!clip || folder === BIN) return;
+  const c = clip, target = ctx === 'side' && sbSel && sbSel[0] === 'f' ? sbSel.slice(2) : folder;
+  const its = keyItems(c.keys), fl = keyFolders(c.keys);
+  if (!its.length && !fl.length) { clip = null; render(); return; }
+  if (its.length && !target) { toast("Open a folder first: bookmarks can't sit at the top level"); return; }
+  const n = its.length + fl.length, verb = c.mode === 'cut' ? 'Move' : 'Copy';
+  if (!await ask({ title: `${verb} here?`, message: `${verb} ${n === 1 ? qt(its.length ? its[0].title : leaf(fl[0])) : n + ' items'} to ${tn(target)}?`, ok: verb })) return;
+  await transfer(c.mode === 'cut' ? 'move' : 'copy', its.map(i => i.id), fl, target);
+  if (c.mode === 'cut') clip = null; render();
+}
+function selAll() {
+  if (folder === BIN) return;
+  ctx = 'main'; sbSel = null; selMode = true;
+  view.subs.forEach(p => sel.add('f:' + p)); view.f.forEach(i => sel.add('i:' + i.id)); render();
+}
+document.addEventListener('keydown', e => {
+  if (e.defaultPrevented || document.querySelector('dialog[open]')) return;
+  const t = e.target; if (t && t.closest && t.closest('input,textarea,select,[contenteditable="true"]')) return;
+  const mod = e.ctrlKey || e.metaKey, k = e.key.toLowerCase(), has = selKeys().length > 0;
+  let used = true;
+  if (e.key === 'Escape') { if (clip) cancelClip(); else if (selMode || sel.size) setSelMode(false); else if (sbSel) { sbSel = null; renderTree(); } else used = false; }
+  else if (mod && k === 'z') (e.shiftKey ? redo : undo)();
+  else if (mod && k === 'y') redo();
+  else if (mod && k === 'a') selAll();
+  else if (mod && k === 'c' && ctx === 'main' && sel.size) copyCut('copy');
+  else if (mod && k === 'x' && ctx === 'main' && sel.size) copyCut('cut');
+  else if (mod && k === 'v' && clip) paste();
+  else if (e.key === 'Delete' && has) delKeys();
+  else if (e.key === 'F2' && has) renKey();
+  else used = false;
+  if (used) e.preventDefault();
+});
+
 function render() {
-  if (folder !== lastF) { trackFwd(lastF, folder); lastF = folder; try { history.replaceState(null, '', fHref(folder)); } catch {} const s = folder.split('/'); s.slice(0, -1).forEach((_, i) => openF.add(s.slice(0, i + 1).join('/'))); }
-  renderTree(); renderSel();
+  if (folder === BIN) { selMode = false; sel.clear(); }
+  if (folder !== lastF) {
+    trackFwd(lastF, folder); lastF = folder; try { history.replaceState(null, '', fHref(folder)); } catch {}
+    if (folder && folder !== BIN) { const s = folder.split('/'); s.forEach((_, i) => openF.add(s.slice(0, i + 1).join('/'))); saveOpen(); }
+  }
+  renderTree(); renderSel(); updUR();
+  const inB = folder === BIN;
+  for (const s of ['#addf', '#sel', '#more']) $(s).disabled = inB;
+  $('#grid').classList.toggle('binv', inB);
+  if (inB) return renderBin();
   const searching = !!q;
   const ok = i => (!type || i.type === type) && (!folder || inTree(i, folder)) &&
     (!q || (i.title + ' ' + i.url + ' ' + i.notes + ' ' + i.moments.map(m => m.note).join(' ')).toLowerCase().includes(q));
@@ -108,6 +356,7 @@ function render() {
       '📁 ' + p, ' ', el('small', {}, base.filter(i => inTree(i, p)).length)))] : []));
   const th = i => i.thumb || (i.snaps[0] && i.snaps[0].img);
   const subs = searching ? [] : folders.filter(p => parentOf(p) === folder);
+  view = { subs, f };
   const parts = folder ? folder.split('/') : [];
   const crumbs = [{ icon: '📚', name: 'All bookmarks', p: '' }, ...parts.map((x, i) => ({ icon: '📁', name: x, p: parts.slice(0, i + 1).join('/') }))];
   $('#crumbs').replaceChildren(...crumbs.flatMap((c, i) => {
@@ -119,12 +368,13 @@ function render() {
   $('#back').disabled = !folder; $('#fwd').disabled = !nextToward();
   $('#subs').replaceChildren(...subs.map(p => {
     const inside = items.filter(i => inTree(i, p)), prev = inside.slice(0, 4), n = inside.length;
-    return el('a', { class: 'fcard' + (sel.has('f:' + p) ? ' sel' : ''), href: fHref(p), onclick: e => { if (picking(e)) { e.preventDefault(); toggleSel('f:' + p); } else nav(p)(e); } },
+    return el('a', { class: 'fcard' + (sel.has('f:' + p) ? ' sel' : '') + (isCut('f:' + p) ? ' cut' : ''), href: fHref(p), onclick: e => { if (picking(e)) { e.preventDefault(); toggleSel('f:' + p); } else nav(p)(e); } },
       cbx('f:' + p),
       el('div', { class: 'fgrid' }, ...[0, 1, 2, 3].map(k => { const u = prev[k] && th(prev[k]); return el('div', { class: 'fc' }, u ? el('img', { src: u, loading: 'lazy', onerror: e => e.target.remove() }) : null); })),
-      el('div', { class: 'fname' }, p.split('/').pop()), el('div', { class: 'fcount' }, `${n} item${n === 1 ? '' : 's'}`));
+      el('div', { class: 'fname' }, leaf(p)), el('div', { class: 'fcount' }, `${n} item${n === 1 ? '' : 's'}`),
+      el('button', { class: 'dots', title: 'More', onclick: e => { e.preventDefault(); e.stopPropagation(); folderMenu(e.currentTarget, p, { where: 'main' }); } }, '⋮'));
   }));
-  $('#grid').replaceChildren(...(f.length ? f.map(i => el('div', { class: 'card' + (sel.has('i:' + i.id) ? ' sel' : '') }, cbx('i:' + i.id),
+  $('#grid').replaceChildren(...(f.length ? f.map(i => el('div', { class: 'card' + (sel.has('i:' + i.id) ? ' sel' : '') + (isCut('i:' + i.id) ? ' cut' : '') }, cbx('i:' + i.id),
     el('a', { class: 'cl', href: i.url, target: '_blank', rel: 'noopener', onclick: e => { if (picking(e)) { e.preventDefault(); toggleSel('i:' + i.id); } }, ondragstart: e => e.dataTransfer.setData('text/plain', i.id) },
       el('div', { class: 'th' }, th(i) ? el('img', { src: th(i), loading: 'lazy', onerror: e => e.target.replaceWith(ICON[i.type]) }) : ICON[i.type]),
       el('div', { class: 'cb' }, el('div', { class: 't' }, i.title),
@@ -133,39 +383,96 @@ function render() {
     (subs.length ? [] : [el('div', { class: 'empty' }, items.length ? (folder ? 'Nothing here.' : 'Nothing matches.') : 'Empty library. Open any page and press Alt+B, or right-click → "Save to my library".')])));
 }
 
+const ago = t => { const m = Math.floor((Date.now() - t) / 6e4); if (m < 1) return 'just now'; if (m < 60) return m + ' min ago'; const h = Math.floor(m / 60); return h < 24 ? h + ' h ago' : Math.floor(h / 24) + ' d ago'; };
+function renderBin() {
+  $('#back').disabled = false; $('#fwd').disabled = true;
+  $('#crumbs').replaceChildren(el('a', { class: 'cr', href: fHref(''), onclick: nav('') }, el('span', { class: 'ci' }, '📚'), 'All bookmarks'),
+    el('span', { class: 'sep' }, '›'), el('span', { class: 'cur cr' }, el('span', { class: 'ci' }, '🗑'), 'Recycle bin'));
+  $('#subs').replaceChildren(); $('#chips').replaceChildren();
+  const list = [...bin].sort((a, b) => b.at - a.at);
+  $('#grid').replaceChildren(...(list.length ? [
+    el('div', { class: 'binhd' }, el('span', { class: 'm' }, `${list.length} deleted item${list.length > 1 ? 's' : ''}`), el('button', { class: 'warnb', onclick: emptyBin }, 'Empty bin')),
+    ...list.map(e => el('div', { class: 'brow' },
+      el('span', { class: 'bi' }, e.kind === 'item' ? ICON[e.item.type] : '📁'),
+      el('div', { class: 'bt' }, el('div', { class: 't1' }, binName(e)),
+        el('div', { class: 'm' }, (e.kind === 'item' ? 'Bookmark' : 'Folder') + ' · deleted ' + ago(e.at) + (e.kind === 'item' ? ' · 📁 ' + e.item.folders.join(', ') : ' · ' + e.path))),
+      el('button', { onclick: () => restoreBin(e) }, '↩ Restore'), el('button', { class: 'warnb', onclick: () => purge([e]) }, 'Delete forever')))
+  ] : [el('div', { class: 'empty' }, 'The recycle bin is empty.')]));
+}
+
 function renderSel() {
   for (const k of [...sel]) if (k[0] === 'i' ? !items.some(i => i.id === k.slice(2)) : !folders.includes(k.slice(2))) sel.delete(k);
   document.body.classList.toggle('selmode', selMode); $('#sel').classList.toggle('on', selMode);
-  const bar = $('#selbar'); bar.hidden = sel.size === 0; if (!sel.size) return;
+  const bar = $('#selbar');
+  if (!sel.size) {
+    const n = clip && folder !== BIN ? keyItems(clip.keys).length + keyFolders(clip.keys).length : 0;
+    if (clip && !n && folder !== BIN) clip = null;
+    bar.hidden = !n; if (!n) return;
+    bar.replaceChildren(el('span', { class: 'sc' }, `${n} ${clip.mode === 'cut' ? 'cut' : 'copied'}`), el('button', { class: 'primary', onclick: () => paste() }, '📥 Paste here'), el('button', { onclick: cancelClip }, 'Cancel'));
+    return;
+  }
+  bar.hidden = false;
   bar.replaceChildren(el('span', { class: 'sc' }, `${sel.size} selected`),
     el('button', { onclick: () => bulk('copy') }, '📋 Copy to…'), el('button', { onclick: () => bulk('move') }, '➡️ Move to…'),
     el('button', { class: 'warnb', onclick: bulkDelete }, '🗑 Delete'), el('button', { title: 'Exit select mode', onclick: () => setSelMode(false) }, 'Done'));
 }
-const selItems = () => [...sel].filter(k => k[0] === 'i').map(k => items.find(i => i.id === k.slice(2))).filter(Boolean);
-const selFolders = () => { const fs = [...sel].filter(k => k[0] === 'f').map(k => k.slice(2)); return fs.filter(p => !fs.some(o => o !== p && inF(p, o))); };
+const selItems = () => keyItems([...sel]);
+const selFolders = () => keyFolders([...sel]);
 
-function pickFolder({ title, ok, rootOption = false, exclude = () => false }) {
+function treeBox({ hidden = () => false, disabled = () => false, isOn = () => false, onPick, onDbl, rootOption = false, openInit = [] }) {
+  const opened = new Set(openInit), box = el('div', { class: 'pkl' });
+  const cnt = p => items.filter(i => inTree(i, p)).length;
+  const draw = () => {
+    const st = box.scrollTop;
+    const mk = (p, label, depth, ks, count, toggle) => {
+      const dis = disabled(p), has = ks && ks.length;
+      return el('div', { class: 'fr' + (isOn(p) ? ' on' : '') + (dis ? ' dis' : ''), onclick: () => { if (!dis) onPick(p); }, ondblclick: () => { if (!dis && onDbl) onDbl(p); } },
+        el('span', { class: 'tg', style: `width:${depth * 16 + 22}px`, ondblclick: e => e.stopPropagation(), onclick: e => { e.stopPropagation(); if (has) toggle(); } },
+          el('span', { class: 'chev' + (opened.has(p) ? ' open' : ''), innerHTML: has ? CHEV : '' })),
+        el('span', { class: 'n' }, label), el('span', { class: 'c' }, count));
+    };
+    const walk = (p, depth) => {
+      if (hidden(p)) return [];
+      const ks = folders.filter(x => parentOf(x) === p && !hidden(x));
+      let w = null;
+      const row = mk(p, '📁 ' + leaf(p), depth, ks, cnt(p), () => {
+        const o = !opened.has(p); o ? opened.add(p) : opened.delete(p);
+        w.classList.toggle('open', o); row.querySelector('.chev').classList.toggle('open', o);
+      });
+      if (!ks.length) return [row];
+      w = el('div', { class: 'sub' + (opened.has(p) ? ' open' : '') }, el('div', { class: 'subi' }, ...ks.flatMap(c => walk(c, depth + 1))));
+      return [row, w];
+    };
+    const out = [];
+    if (rootOption) out.push(mk('', '📚 Top level', 0, [], ''));
+    folders.filter(x => !x.includes('/')).forEach(t => out.push(...walk(t, 0)));
+    box.replaceChildren(...out); box.scrollTop = st;
+  };
+  return { box, draw, opened };
+}
+
+function pickFolder({ title, ok, rootOption = false, exclude = () => false, disabled = () => false }) {
   return new Promise(res => {
-    const d = $('#modal'); let done = false, choice = null, adding = false, st = 0;
+    const d = $('#modal'); let done = false, choice = null, adding = false;
     const fin = v => { if (done) return; done = true; d.close(); res(v); };
-    const row = (p, text, depth) => el('div', { class: 'pk' + (choice === p ? ' on' : ''), style: `padding-left:${10 + depth * 16}px`, onclick: () => { choice = p; draw(); } }, text);
+    const tb = treeBox({ hidden: exclude, disabled, rootOption, isOn: p => choice === p, onPick: p => { choice = p; draw(); }, onDbl: p => { choice = p; fin(p); } });
     const draw = () => {
-      const old = d.querySelector('.pkl'); st = old ? old.scrollTop : 0;
-      const list = el('div', { class: 'pkl' }, ...(rootOption ? [row('', '📚 Top level', 0)] : []),
-        ...folders.filter(p => !exclude(p)).map(p => row(p, '📁 ' + p.split('/').pop(), p.split('/').length - 1)));
+      const st = tb.box.scrollTop; tb.draw();
       let foot;
       if (adding) {
         const inp = el('input', { type: 'text', placeholder: choice ? `New folder inside "${choice}"` : 'New top-level folder' });
         const create = async () => {
           const n = inp.value.split('/').map(x => x.trim()).filter(Boolean).join('/'); if (!n) return;
-          choice = await lib.addFolder(choice ? choice + '/' + n : n); folders = await lib.folders(); adding = false; draw();
+          choice = await createFolderAct(choice ? choice + '/' + n : n); folders = await lib.folders();
+          const s = choice.split('/'); s.slice(0, -1).forEach((_, i) => tb.opened.add(s.slice(0, i + 1).join('/')));
+          adding = false; draw();
         };
         inp.onkeydown = e => { if (e.key === 'Enter') { e.stopPropagation(); e.preventDefault(); create(); } };
         foot = [inp, el('div', { class: 'mb' }, el('button', { onclick: () => { adding = false; draw(); } }, 'Back'), el('button', { class: 'primary', onclick: create }, 'Create'))];
         setTimeout(() => inp.focus());
       } else foot = [el('div', { class: 'mb' }, el('button', { onclick: () => { adding = true; draw(); } }, '➕ New folder'), el('span', { class: 'grow' }),
         el('button', { onclick: () => fin(null) }, 'Cancel'), el('button', { class: 'primary', disabled: choice === null, onclick: () => fin(choice) }, ok))];
-      d.replaceChildren(el('h3', {}, title), list, ...foot); list.scrollTop = st;
+      d.replaceChildren(el('h3', {}, title), tb.box, ...foot); tb.box.scrollTop = st;
     };
     d.onkeydown = e => { if (e.key === 'Enter' && !adding && choice !== null && e.target.tagName !== 'BUTTON') { e.preventDefault(); fin(choice); } };
     d.oncancel = e => { e.preventDefault(); fin(null); };
@@ -182,6 +489,7 @@ async function copyFolder(src, tp) {
     if (add.length) { it.folders = normF([...it.folders, ...add]); await lib.put(it); }
   }
 }
+
 async function moveFolderTo(src, tp) {
   const nm = src.split('/').pop(), to = tp ? tp + '/' + nm : nm;
   if (to === src) return 'same';
@@ -191,33 +499,29 @@ async function moveFolderTo(src, tp) {
   if (inF(folder, src)) folder = to + folder.slice(src.length);
   folders = await lib.folders(); return 'ok';
 }
+
 async function bulk(kind) {
   const its = selItems(), ids = its.map(i => i.id), fl = selFolders().filter(p => kind === 'copy' || p !== 'General');
-  if (!ids.length && !fl.length) { await ask({ title: 'Nothing to move', message: '"General" can\'t be moved.', cancel: null }); return; }
+  if (!ids.length && !fl.length) { toast('"General" can\'t be moved'); return; }
   const n = ids.length + fl.length;
   const target = await pickFolder({ title: `${kind === 'copy' ? 'Copy' : 'Move'} ${n} item${n > 1 ? 's' : ''} to…`, ok: kind === 'copy' ? 'Copy here' : 'Move here', rootOption: !ids.length, exclude: p => fl.some(f => inF(p, f)) });
   if (target === null) return;
-  const skipped = [];
-  for (const f of fl) { if (kind === 'copy') await copyFolder(f, target); else if (await moveFolderTo(f, target) === 'exists') skipped.push(f); }
-  items = await lib.all(); folders = await lib.folders();
-  for (const id of ids) {
-    const it = items.find(x => x.id === id); if (!it) continue;
-    it.folders = kind === 'copy' ? normF([...it.folders, target]) : moveFolders(it, target); await lib.put(it);
-  }
-  sel.clear(); await load();
-  if (skipped.length) await ask({ title: 'Some folders were skipped', message: `Not moved, because a folder with the same name already exists there: ${skipped.join(', ')}.`, cancel: null });
+  sel.clear(); await transfer(kind, ids, fl, target);
 }
 async function bulkDelete() {
-  const its = selItems(), fl = selFolders().filter(p => p !== 'General'), parts = [];
-  if (its.length) parts.push(`${its.length} bookmark${its.length > 1 ? 's' : ''}`);
-  if (fl.length) parts.push(`${fl.length} folder${fl.length > 1 ? 's' : ''} (their bookmarks move up to the parent folder)`);
-  if (!parts.length) return;
-  if (!await ask({ title: 'Delete selection', message: `Delete ${parts.join(' and ')}?`, ok: 'Delete', warn: true })) return;
-  for (const f of fl) await lib.removeFolder(f);
-  for (const i of its) await lib.del(i.id);
-  sel.clear(); await load();
+  const its = selItems(), fl = selFolders().filter(p => p !== 'General');
+  if (!its.length && !fl.length) { toast('"General" can\'t be deleted'); return; }
+  await trashSel(its, fl);
 }
-document.addEventListener('keydown', e => { if (e.key === 'Escape' && selMode && !document.querySelector('dialog[open]')) setSelMode(false); });
+async function itemTo(i, mode) {
+  const from = folder || (i.folders.length === 1 ? i.folders[0] : null);
+  const t = await pickFolder({ title: mode === 'add' ? 'Copy to…' : 'Move to…', ok: mode === 'add' ? 'Copy here' : 'Move here', disabled: p => mode === 'add' ? i.folders.some(f => inF(f, p)) : p === from });
+  if (t === null) return; mode === 'add' ? addTo(i, t) : moveTo(i, t);
+}
+async function folderTo(p, kind) {
+  const t = await pickFolder({ title: `${kind === 'copy' ? 'Copy' : 'Move'} "${leaf(p)}" to…`, ok: kind === 'copy' ? 'Copy here' : 'Move here', rootOption: true, exclude: x => inF(x, p) });
+  if (t === null) return; transfer(kind, [], [p], t);
+}
 
 function closeMenu() { $('#menu')?.remove(); }
 function popup(btn, left = false) {
@@ -232,34 +536,31 @@ function popup(btn, left = false) {
   document.body.append(m);
   return { m, mi, place };
 }
-function menu(btn, i) {
-  const { m, mi, place } = popup(btn);
-  const main = () => { m.replaceChildren(
-    mi('📁  Add to…', () => pick('add')), mi('➡️  Move to…', () => pick('move')),
-    mi('🔎  Details (snapshots & timestamps)', () => { closeMenu(); open(i.id); }),
-    mi('🗑  Delete', async () => {
-      closeMenu();
-      const ok = await ask({ title: 'Delete bookmark', message: i.folders.length > 1 ? 'This bookmark is in several folders and will be deleted from all of them.' : `"${i.title}" will be deleted.`, ok: 'Delete', warn: true });
-      if (ok) { await lib.del(i.id); load(); }
-    }, 'danger')); place(); };
-  const pick = mode => {
-    const from = folder || (i.folders.length === 1 ? i.folders[0] : null);
-    const opts = folders.filter(p => mode === 'add' ? !i.folders.some(f => inF(f, p)) : p !== from);
-    const go = p => { closeMenu(); mode === 'add' ? addTo(i, p) : moveTo(i, p); };
-    m.replaceChildren(mi('←  Back', main), el('div', { class: 'mt' }, mode === 'add' ? 'ADD TO FOLDER' : 'MOVE TO FOLDER'),
-      ...opts.map(p => mi(lbl(p), () => go(p))), mi('➕  New folder…', async () => { const p = await createIn(folder); if (p) go(p); })); place();
-  };
-  main();
-}
-function folderMenu(btn, p, noNew = false) {
+function menu(btn, i, side = false) {
   const { m, mi, place } = popup(btn);
   m.replaceChildren(
-    mi('↗️  Open in new tab', () => { closeMenu(); openTab(p); }),
-    ...(noNew ? [] : [mi('📁＋  New subfolder', async () => { closeMenu(); const n = await createIn(p); if (n) { openF.add(p); saveOpen(); folder = n; load(); } })]),
-    ...(p && p !== 'General' ? [mi('✏️  Rename', () => { closeMenu(); renameF(p); }), mi('🗑  Delete', () => { closeMenu(); deleteF(p); }, 'danger')] : []));
+    mi('☑️  Select', () => { closeMenu(); selectKey('i:' + i.id, side ? 'side' : 'main'); }),
+    ...(side ? [mi('↗️  Open link', () => { closeMenu(); window.open(i.url, '_blank', 'noopener'); })]
+      : [mi('📁  Copy to…', () => { closeMenu(); itemTo(i, 'add'); }), mi('➡️  Move to…', () => { closeMenu(); itemTo(i, 'move'); })]),
+    mi('✏️  Rename      F2', () => { closeMenu(); renameItem(i); }),
+    mi('🔎  Details (snapshots & timestamps)', () => { closeMenu(); open(i.id); }),
+    mi('🗑  Delete      Del', () => { closeMenu(); trashSel([i], []); }, 'danger'));
   place();
 }
-document.addEventListener('click', e => { if (!e.target.closest('.menu')) closeMenu(); });
+function folderMenu(btn, p, o = {}) {
+  const { m, mi, place } = popup(btn), real = p && p !== 'General';
+  m.replaceChildren(
+    ...(o.where ? [mi('☑️  Select', () => { closeMenu(); selectKey('f:' + p, o.where); })] : []),
+    mi('↗️  Open in new tab', () => { closeMenu(); openTab(p); }),
+    ...(o.noNew ? [] : [mi('📁＋  New subfolder', async () => { closeMenu(); const n = await createIn(p); if (n) { openF.add(p); saveOpen(); folder = n; load(); } })]),
+    ...(o.where === 'main' ? [mi('📁  Copy to…', () => { closeMenu(); folderTo(p, 'copy'); }), ...(real ? [mi('➡️  Move to…', () => { closeMenu(); folderTo(p, 'move'); })] : [])] : []),
+    ...(real ? [mi('✏️  Rename      F2', () => { closeMenu(); renameF(p); }), mi('🗑  Delete      Del', () => { closeMenu(); trashSel([], [p]); }, 'danger')] : []));
+  place();
+}
+document.addEventListener('click', e => {
+  if (!e.target.closest('.menu')) closeMenu();
+  if (sbSel && !e.target.closest('aside')) { sbSel = null; renderTree(); }
+});
 addEventListener('scroll', closeMenu, true);
 
 function open(id) {
@@ -284,57 +585,77 @@ function open(id) {
   if (!d.open) d.showModal();
 }
 
+let drawnOpen = null;
 function renderTree() {
+  if (sbSel && !(sbSel[0] === 'i' ? items.some(i => i.id === sbSel.slice(2)) : folders.includes(sbSel.slice(2)))) sbSel = null;
   const kids = p => folders.filter(x => parentOf(x) === p);
   const direct = p => items.filter(i => i.folders.includes(p));
-  const out = [el('div', rowProps('', 'fr' + (folder === '' ? ' on' : '')),
-    el('span', { class: 'chev' }), nameLink('', '📚 All bookmarks'), el('span', { class: 'c' }, items.length), el('span', { class: 'fd' }))];
-  const walk = (p, depth) => {
-    const has = kids(p).length || direct(p).length, isOpen = openF.has(p);
-    out.push(el('div', {
-      ...rowProps(p, 'fr' + (p === folder ? ' on' : '') + (sel.has('f:' + p) ? ' sel' : '')),
-      ondragover: e => e.preventDefault(),
-      ondrop: e => { e.preventDefault(); const it = items.find(x => x.id === e.dataTransfer.getData('text/plain')); if (it) moveTo(it, p); },
-    }, el('span', { class: 'ind', style: `width:${depth * 16}px` }),
-      el('span', { class: 'chev' + (isOpen ? ' open' : ''), innerHTML: has ? CHEV : '', onclick: e => { e.stopPropagation(); if (!has) return; isOpen ? openF.delete(p) : openF.add(p); saveOpen(); renderTree(); } }),
-      cbx('f:' + p), nameLink(p, '📁 ' + p.split('/').pop()), el('span', { class: 'c' }, items.filter(i => inTree(i, p)).length), el('button', { class: 'fdots', title: 'Folder options', onclick: e => { e.stopPropagation(); folderMenu(e.currentTarget, p); } }, '⋮')));
-    if (isOpen) {
-      kids(p).forEach(c => walk(c, depth + 1));
-      direct(p).forEach(i => out.push(el('div', { class: 'fr it' + (sel.has('i:' + i.id) ? ' sel' : '') },
-        el('span', { class: 'ind', style: `width:${(depth + 1) * 16}px` }), el('span', { class: 'chev' }),
-        cbx('i:' + i.id), el('a', { class: 'n', href: i.url, target: '_blank', rel: 'noopener', title: i.title, onclick: e => { if (picking(e)) { e.preventDefault(); toggleSel('i:' + i.id); } }, textContent: i.title }))));
-    }
+  const nowOpen = new Set();
+  // the whole left strip (indent + arrow) is the expand/collapse target, so a stray click there never selects the folder
+  const tg = (w, has = false, isOpen = false, toggle = null) => el('span', { class: 'tg', style: `width:${w}px`, onclick: e => { e.stopPropagation(); if (has && toggle) toggle(); } },
+    el('span', { class: 'chev' + (isOpen ? ' open' : ''), innerHTML: has ? CHEV : '' }));
+  const sub = (isOpen, key, nodes) => {
+    const w = el('div', { class: 'sub' }, el('div', { class: 'subi' }, ...nodes));
+    if (isOpen) { nowOpen.add(key); if (drawnOpen === null || drawnOpen.has(key)) w.classList.add('open'); else requestAnimationFrame(() => requestAnimationFrame(() => w.classList.add('open'))); }
+    return w;
   };
-  kids('').forEach(t => walk(t, 0));
+  const itemRow = (i, depth) => el('div', { class: 'fr it' + (sbSel === 'i:' + i.id ? ' sel' : '') },
+    tg(depth * 16 + 22),
+    el('a', { class: 'n', href: i.url, target: '_blank', rel: 'noopener', title: i.title, textContent: i.title }),
+    el('button', { class: 'fdots', title: 'Bookmark options', onclick: e => { e.stopPropagation(); menu(e.currentTarget, i, true); } }, '⋮'));
+  const out = [el('div', rowProps('', 'fr' + (folder === '' ? ' on' : '')),
+    tg(22), nameLink('', '📚 All bookmarks'), el('span', { class: 'c' }, items.length), el('span', { class: 'fd' }))];
+  const walk = (p, depth) => {
+    const ks = kids(p), ds = direct(p), has = ks.length || ds.length, isOpen = openF.has(p);
+    let w = null;
+    const row = el('div', {
+      ...rowProps(p, 'fr' + (p === folder ? ' on' : '') + (sbSel === 'f:' + p ? ' sel' : '')),
+      ondragover: e => e.preventDefault(),
+      ondrop: e => { e.preventDefault(); const it = items.find(x => x.id === e.dataTransfer.getData('text/plain')); if (it) dropMove(it, p); },
+    }, tg(depth * 16 + 22, has, isOpen, () => {
+      const o = !openF.has(p); o ? openF.add(p) : openF.delete(p); saveOpen();
+      w.classList.toggle('open', o); row.querySelector('.chev').classList.toggle('open', o);
+      if (drawnOpen) o ? drawnOpen.add(p) : drawnOpen.delete(p);
+    }), nameLink(p, '📁 ' + leaf(p)), el('span', { class: 'c' }, items.filter(i => inTree(i, p)).length),
+      el('button', { class: 'fdots', title: 'Folder options', onclick: e => { e.stopPropagation(); folderMenu(e.currentTarget, p, { where: 'side' }); } }, '⋮'));
+    if (!has) return [row];
+    w = sub(isOpen, p, [...ks.flatMap(c => walk(c, depth + 1)), ...ds.map(i => itemRow(i, depth + 1))]);
+    return [row, w];
+  };
+  out.push(...kids('').flatMap(t => walk(t, 0)));
+  out.push(el('div', {
+    ...rowProps(BIN, 'fr binfr' + (folder === BIN ? ' on' : '')),
+    ondragover: e => e.preventDefault(),
+    ondrop: e => { e.preventDefault(); const it = items.find(x => x.id === e.dataTransfer.getData('text/plain')); if (it) trashSel([it], []); },
+  }, tg(22), nameLink(BIN, '🗑 Recycle bin'), el('span', { class: 'c' }, bin.length || ''), el('span', { class: 'fd' })));
+  drawnOpen = nowOpen;
   $('#tree').replaceChildren(...out);
 }
 async function renameF(p) {
-  const name = await ask({ title: 'Rename folder', input: { value: p.split('/').pop() }, ok: 'Rename' });
-  const n = (name || '').replace(/\//g, '-').trim(); if (!n) return;
+  const name = await ask({ title: 'Rename folder', input: { value: leaf(p) }, ok: 'Rename' });
+  const n = (name || '').replace(/\//g, '-').trim(); if (!n || n === leaf(p)) return;
   const to = (p.includes('/') ? p.slice(0, p.lastIndexOf('/')) + '/' : '') + n;
   if (folders.some(x => x !== p && x.toLowerCase() === to.toLowerCase())) { await ask({ title: 'Name already used', message: 'A folder with that name already exists here.', cancel: null }); return; }
-  await lib.moveFolder(p, to);
-  openF = new Set([...openF].map(x => inF(x, p) ? to + x.slice(p.length) : x)); saveOpen();
-  if (inF(folder, p)) folder = to + folder.slice(p.length); load();
+  await doAct(idsFor([], [p]), [], async () => {
+    await lib.moveFolder(p, to);
+    openF = new Set([...openF].map(x => inF(x, p) ? to + x.slice(p.length) : x)); saveOpen();
+    if (inF(folder, p)) folder = to + folder.slice(p.length);
+    return `Folder ${qt(leaf(p))} renamed to ${qt(n)}`;
+  });
 }
-async function deleteF(p) {
-  const par = p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : 'General';
-  const ok = await ask({ title: 'Delete folder', message: `Delete "${p}"? Its bookmarks (and those in its subfolders) move to "${par}".`, ok: 'Delete', warn: true });
-  if (!ok) return;
-  await lib.removeFolder(p); if (inF(folder, p)) folder = par; load();
-}
-$('#back').onclick = () => { if (folder) { folder = parentOf(folder); render(); } };
-$('#fwd').onclick = () => { const t = nextToward(); if (t) { folder = t; render(); } };
+$('#undo').onclick = undo; $('#redo').onclick = redo;
+$('#back').onclick = () => { if (folder) goTo(parentOf(folder)); };
+$('#fwd').onclick = () => { const t = nextToward(); if (t) goTo(t); };
 $('#addf').onclick = async () => { const p = await createIn(folder); if (p) { folder = p; load(); } };
-$('#more').onclick = e => { e.stopPropagation(); folderMenu(e.currentTarget, folder, true); };
-$('#nf').onclick = async () => { const p = await createIn(folder); if (p) { folder = p; load(); } };
+$('#more').onclick = e => { e.stopPropagation(); folderMenu(e.currentTarget, folder, { noNew: true }); };
+$('#nf').onclick = async () => { const p = await createIn(folder === BIN ? '' : folder); if (p) { folder = p; load(); } };
 
 $('#dlg').addEventListener('click', e => { if (e.target.id === 'dlg') e.target.close(); });
 $('#q').oninput = e => { q = e.target.value.toLowerCase(); render(); };
 $('#ty').onchange = e => { type = e.target.value; render(); };
 const fingerprint = () => `${items.length}:${items.reduce((n, i) => n + i.snaps.length + i.moments.length, 0)}:${folders.length}`;
 async function doExport() {
-  const blob = new Blob([JSON.stringify({ version: 3, items: await lib.all(), folders: await lib.folders() })], { type: 'application/json' });
+  const blob = new Blob([JSON.stringify({ version: 4, items: await lib.all(), folders: await lib.folders(), bin: await lib.binAll() })], { type: 'application/json' });
   el('a', { href: URL.createObjectURL(blob), download: `library-backup-${new Date().toISOString().slice(0, 10)}.json` }).click();
   try { localStorage.setItem('lastBackup', Date.now()); localStorage.setItem('backupFp', fingerprint()); localStorage.removeItem('snooze'); } catch {}
   showBanner();
@@ -360,6 +681,7 @@ $('#fi').onchange = async e => {
     const raw = JSON.parse(await e.target.files[0].text());
     const data = Array.isArray(raw) ? raw : raw.items || [];
     for (const f of raw.folders || []) await lib.addFolder(f);
+    for (const b of raw.bin || []) if (b && b.bid) await lib.binPut(b);
     for (const o of data) if (o && o.id) {
       const fs = Array.isArray(o.folders) && o.folders.length ? o.folders : [o.folder || 'General'];
       o.folders = [...new Set(await Promise.all(fs.map(f => lib.addFolder(f))))];

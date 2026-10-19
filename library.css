@@ -112,3 +112,34 @@ body.resizing{cursor:col-resize;user-select:none}body.resizing *{cursor:col-resi
 
 #banner{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:8px 20px;background:#f59e0b22;border-bottom:1px solid #f59e0b66;font-size:13px}
 #banner[hidden]{display:none}#banner .bm{flex:1;min-width:240px}
+
+/* v3: expand strip, wrapping folder names, bin, toasts */
+.fr{padding:3px 4px 3px 0;gap:0}
+.tg{display:flex;align-items:center;justify-content:flex-end;align-self:stretch;flex:none;padding-right:4px;cursor:pointer}
+.fr .n{margin:0 4px 0 0}
+.fr.dis{opacity:.4;cursor:default}.fr.dis:hover{background:transparent}
+.fr.binfr{margin-top:12px}
+.fname{white-space:normal;word-break:break-word;overflow:visible;text-overflow:clip}
+.fcard .dots{top:6px;bottom:auto;right:6px;background:var(--c)!important;border:1px solid var(--b)!important}
+.fcard.cut,.card.cut{opacity:.5}
+#grid.binv{display:flex;flex-direction:column;gap:8px}
+.binhd{display:flex;justify-content:space-between;align-items:center}
+.brow{display:flex;gap:12px;align-items:center;padding:10px 12px;background:var(--c);border:1px solid var(--b);border-radius:10px}
+.brow .bi{font-size:22px}.brow .bt{flex:1;min-width:0}.brow .t1{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#toasts{position:fixed;left:20px;bottom:22px;z-index:70;width:min(380px,calc(100vw - 40px));display:flex;flex-direction:column;pointer-events:none}
+.tw{display:grid;grid-template-rows:0fr;opacity:0;transform:translateY(10px);transition:grid-template-rows .28s ease,opacity .28s ease,transform .28s ease;pointer-events:auto}
+.tw.show{grid-template-rows:1fr;opacity:1;transform:none}
+.tin{overflow:hidden;min-height:0}
+.tb{display:flex;align-items:center;gap:10px;margin-bottom:8px;padding:10px 12px;background:#20242f;color:#fff;border-radius:10px;box-shadow:0 4px 14px #0005;font-size:13px}
+.tm{flex:1;word-break:break-word}
+.tb button{background:transparent;border:0;color:#a5b4fc;padding:2px 6px;font-weight:600}.tb .tx{color:#fff;opacity:.6;font-weight:400}
+
+/* animated dropdowns */
+.sub{display:grid;grid-template-rows:0fr;transition:grid-template-rows .22s ease}
+.sub.open{grid-template-rows:1fr}
+.subi{overflow:hidden;min-height:0}
+.chev svg{transition:transform .22s ease}
+.menu{animation:mpop .15s ease-out;transform-origin:top right}
+@keyframes mpop{from{opacity:0;transform:scale(.96) translateY(-4px)}}
+dialog[open]{animation:dpop .16s ease-out}
+@keyframes dpop{from{opacity:0;transform:translateY(6px)}}

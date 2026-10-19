@@ -1,10 +1,11 @@
 const lib = (() => {
   const open = () => new Promise((res, rej) => {
-    const r = indexedDB.open('video-library', 2);
+    const r = indexedDB.open('video-library', 3);
     r.onupgradeneeded = () => {
       const d = r.result;
       if (!d.objectStoreNames.contains('items')) d.createObjectStore('items', { keyPath: 'id' });
       if (!d.objectStoreNames.contains('folders')) d.createObjectStore('folders', { keyPath: 'path' });
+      if (!d.objectStoreNames.contains('bin')) d.createObjectStore('bin', { keyPath: 'bid' });
     };
     r.onsuccess = () => res(r.result);
     r.onerror = () => rej(r.error);
@@ -60,6 +61,10 @@ const lib = (() => {
       return sortPaths(k);
     },
     addFolder,
+    setFolders: paths => tx('folders', 'readwrite', s => { s.clear(); paths.forEach(p => s.put({ path: p })); }),
+    binAll: () => tx('bin', 'readonly', s => s.getAll()),
+    binPut: o => tx('bin', 'readwrite', s => s.put(o)),
+    binDel: id => tx('bin', 'readwrite', s => s.delete(id)),
     moveFolder: (from, to) => move(from, p => to + p.slice(from.length)),
     removeFolder: from => move(from, () => from.includes('/') ? from.slice(0, from.lastIndexOf('/')) : 'General'),
   };
